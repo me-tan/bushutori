@@ -5,14 +5,25 @@
  * 鳴る（Android・PCでは効く）。音量つまみをiOSでも効かせるにはWeb Audioの
  * GainNodeを通す必要がある。
  *
- * つなぐときの決まりごと：AudioContextが running になったことを確かめてから
- * でないとつながない。suspended のままつなぐと、その要素の音はどこにも出なく
- * なる。resume() は非同期なので呼んだ直後はまだ running ではなく、しかも
- * createMediaElementSource は1要素につき1回きりで元に戻せないため、一度そう
- * なった要素は二度と鳴らない。
+ * 効果音とBGMで鳴らし方が違う。iPhoneでの実機確認でこうなった。
  *
- * つないでいない間は <audio> のまま鳴らす。Web Audioが使えない・起こせない
- * 環境でも音が消えないようにするため。
+ * 効果音は <audio> をグラフにつながない。音のデータを読み込んで復号し、
+ * 鳴らすたびに使い捨ての音源（BufferSource）をgainにつないで鳴らす。
+ * iPhoneでは <audio> を createMediaElementSource でつなぐと、AudioContextが
+ * running でも、その要素を一度鳴らせたあとでも無音になった（1回目は鳴り、
+ * つないだ2回目から鳴らなくなる、という形で出た）。この接続は1要素につき
+ * 1回きりで元に戻せないため、つないだ時点で手遅れになる。
+ * BufferSourceなら鳴らすたびに作り直すので、無音のまま固定されることがない。
+ *
+ * BGMは長いので復号せず、これまでどおり <audio> をつなぐ。こちらは
+ * 鳴らし始めたあとにつないでいるぶんには実機で鳴っている。
+ *
+ * 別のアプリに切り替えて戻ると、iPhoneではAudioContextの音の出口が切られて
+ * resume() でも戻らない。戻ってきたらAudioContextごと捨てて作り直す
+ *（つないだ <audio> はつなぎ直せないので、BGMは要素ごと作り直す）。
+ *
+ * 復号が間に合わない・Web Audioが使えない間は <audio> のまま鳴らす。
+ * 音が出ないよりは、音量つまみが効かない方がましなので。
  *
  * 消音スイッチ（マナーモード）中は鳴らさない方針。iOS 16.4以降の
  * navigator.audioSession に ambient を指定して、消音スイッチを尊重し、かつ
@@ -60,6 +71,8 @@
   // つないだ要素はgainで音量を決める。つないでいない要素は <audio>.volume を使う。
   let ctx = null, sfxGain = null, bgmGain = null;
   const routed = new WeakSet();
+  // 一度でも鳴らせた要素。つないでよいのはこれだけ（冒頭の決まりごと2）
+  const played = new WeakSet();
 
   function graphReady() { return !!ctx && ctx.state === 'running'; }
 
@@ -71,15 +84,76 @@
       ctx = new Ctx();
       sfxGain = ctx.createGain(); sfxGain.connect(ctx.destination);
       bgmGain = ctx.createGain(); bgmGain.connect(ctx.destination);
-    } catch (e) { ctx = null; }
+    } catch (e) { ctx = null; return; }
+    loadSfxBuffers(); // 復号は起きていなくてもできるので、待たずに始める
   }
 
-  // 画面を触ったときに呼ぶ。runningになって初めて、鳴っているBGMをつなぎ替える。
+  // 画面を触ったときに呼ぶ。ここでは起こすことだけをする（操作の中でしかできない
+  // のはこれだけ）。作ることと復号は setupGraph / discardGraph 側で先に済ませる。
   function wakeGraph() {
     setupGraph();
     if (!ctx) return;
     if (ctx.state === 'running') { routeBgm(); return; }
     ctx.resume().then(routeBgm).catch(() => {});
+  }
+
+  // AudioContextを丸ごと捨てる。作り直すのは次に画面を触ったとき。
+  //
+  // ここで先に作っておくとタップが軽くなるが、それはできない。iPhoneでは
+  // 操作の外で作ったAudioContextは、作れてはいても音が出ない状態になる
+  //（戻ってきた直後はBGMが鳴るのに、ボタンを押して繋いだ瞬間に止まる、という
+  // 形で出た）。作るのも起こすのも、操作の中でやること。
+  //
+  // 捨ててから作り直すまでの間は graphReady() が false なので、効果音は
+  // <audio> のまま鳴る。つまりその間も音は止まらない。
+  function discardGraph() {
+    const old = ctx;
+    ctx = null; sfxGain = null; bgmGain = null;
+    // 古いAudioContextと一緒に消える音源なので、持っていても意味がない。
+    // 一方、復号済みの音データ（sfxBuffers）はAudioContextに縛られないので、
+    // 取り直さずそのまま使い回す。
+    for (const name of Object.keys(sfxNodes)) sfxNodes[name] = null;
+    if (old) { try { old.close(); } catch (e) {} }
+
+    // つないだ <audio> は新しいAudioContextにつなぎ直せない（1要素につき1回きり）。
+    // BGMは要素ごと作り直す。次に画面を触ったときに鳴り始める。
+    // 頭出しに戻らないよう、鳴っていた位置を引き継ぐ。
+    if (bgmKey && bgmAudio && routed.has(bgmAudio)) {
+      const key = bgmKey;
+      const at = bgmAudio.currentTime || 0;
+      delete bgmPool[key]; // つないだ要素はつなぎ直せないので、控えからも外す
+      KBAudio.stopBgm();
+      KBAudio.playBgm(key);
+      seekBgm(at);
+    }
+  }
+
+  // 新しい要素はまだ長さが分かっていないことがあるので、分かってから位置を合わせる
+  function seekBgm(at) {
+    const el = bgmAudio;
+    if (!el || !at) return;
+    const seek = () => { try { el.currentTime = at; } catch (e) {} };
+    if (el.readyState > 0) seek();
+    else el.addEventListener('loadedmetadata', seek, { once: true });
+  }
+
+  // ── 効果音のデータ読み込み ────────────────────────────────────
+  // 復号はAudioContextが起きてからでないとできない。失敗した音は <audio> の
+  // ままになるだけで、鳴らなくなることはない。
+  const sfxBuffers = {};
+  let sfxLoadStarted = false;
+
+  function loadSfxBuffers() {
+    if (sfxLoadStarted || !ctx) return; // 起きていなくても復号はできる
+    sfxLoadStarted = true;
+    for (const name of Object.keys(SFX_FILES)) {
+      fetch(audioUrl(SFX_BASE, SFX_FILES[name]))
+        .then(res => res.arrayBuffer())
+        // 古いSafariは Promise を返さないので、コールバック形式で受ける
+        .then(buf => new Promise((ok, ng) => ctx.decodeAudioData(buf, ok, ng)))
+        .then(decoded => { sfxBuffers[name] = decoded; })
+        .catch(() => {});
+    }
   }
 
   // 要素をグラフにつなぐ。runningでなければ何もしない（つなぐと音が出なくなるため）
@@ -93,8 +167,24 @@
   }
 
   function routeBgm() {
-    if (!bgmAudio || routed.has(bgmAudio)) return;
+    // 鳴らせたことを確かめてからでないとつながない（冒頭の説明を参照）
+    if (!bgmAudio || routed.has(bgmAudio) || !played.has(bgmAudio)) return;
     if (route(bgmAudio, bgmGain)) applyVolume(bgmAudio, 'bgm');
+  }
+
+  // BGMを鳴らし、鳴らせたらグラフにつなぐ。順番を逆にしない。
+  //
+  // play() は呼んだ瞬間ではなく少しあとに効く。そのため「止める→作り直して鳴らす」を
+  // 素早く続けると、捨てたはずの古い要素の play() が後から効いて、新しい要素と
+  // 二重に鳴ってしまう（画面を速く行き来したときに起きる）。
+  // 効いた時点でまだ現役かを確かめ、違っていれば止め直す。
+  function playBgmAudio(el) {
+    if (!el) return;
+    el.play().then(() => {
+      if (el !== bgmAudio) { try { el.pause(); } catch (e) {} return; }
+      played.add(el);
+      routeBgm();
+    }).catch(() => {});
   }
 
   // 消音スイッチ（マナーモード）中は鳴らさない。あわせて、相手が自分で流している
@@ -126,27 +216,79 @@
 
   let bgmAudio = null;
   let bgmKey = null;
+  // BGMも曲ごとに1つだけ作って使い回す。画面を移るたびに止める・鳴らすを
+  // 繰り返すので、そのつど new Audio() すると音声の読み込み口が増え続け、
+  // iOSは同時に扱える数に上限があるため、遊んでいるうちに鳴らなくなる。
+  const bgmPool = {};
+
+  // 復号が済むまでの控え。音ごとに1つだけ作って使い回す（鳴らすたびに
+  // new Audio() すると、iOSは同時に扱える数に上限があるため、遊んでいるうちに
+  // 新しい音が鳴らなくなる）。ここの要素はグラフにつながない。
+  const sfxPool = {};
+  // いま鳴っている音源。音の種類ごとに1つだけ持ち、鳴らし直すときに止める
+  const sfxNodes = {};
+
+  function stopSfx(name) {
+    const prev = sfxNodes[name];
+    if (!prev) return;
+    sfxNodes[name] = null;
+    try { prev.onended = null; prev.stop(); } catch (e) {}
+  }
 
   KBAudio.play = function (name) {
     if (!SFX_FILES[name] || volumeOf('se') <= 0) return;
-    const a = new Audio(audioUrl(SFX_BASE, SFX_FILES[name]));
-    route(a, sfxGain);
+
+    // 復号が済んでいれば、使い捨ての音源で鳴らす。要素を残さないので、
+    // どの端末でも「つないだせいで無音のまま固定される」ことがない。
+    if (graphReady() && sfxBuffers[name]) {
+      try {
+        // 同じ音がまだ鳴っていたら止めてから鳴らし直す。作った音源はそのぶん
+        // 重なって鳴るため、止めないと同じ音が二重に聞こえる（<audio>のときは
+        // 頭出しして鳴らし直していたので、自然と1つだけになっていた）。
+        stopSfx(name);
+        const src = ctx.createBufferSource();
+        src.buffer = sfxBuffers[name];
+        src.connect(sfxGain);
+        sfxGain.gain.value = volumeOf('se');
+        src.onended = () => { if (sfxNodes[name] === src) sfxNodes[name] = null; };
+        sfxNodes[name] = src;
+        src.start();
+        return;
+      } catch (e) { /* 下の <audio> で鳴らす */ }
+    }
+
+    let a = sfxPool[name];
+    if (!a) {
+      a = new Audio(audioUrl(SFX_BASE, SFX_FILES[name]));
+      sfxPool[name] = a;
+    }
     applyVolume(a, 'se');
+    try { a.currentTime = 0; } catch (e) {}
     a.play().catch(() => {});
   };
 
   KBAudio.playBgm = function (name) {
-    if (bgmKey === name && bgmAudio && !bgmAudio.paused) return;
+    // 同じ曲の用意が済んでいるなら、要素は作り直さず鳴らし直すだけにする。
+    // 画面を移るたびにここへ来るので、作り直していると、止める前の音と
+    // 重なって聞こえることがある。
+    if (bgmKey === name && bgmAudio) {
+      if (bgmAudio.paused) playBgmAudio(bgmAudio);
+      return;
+    }
     KBAudio.stopBgm();
     if (!BGM_FILES[name]) return;
     bgmKey = name;
-    bgmAudio = new Audio(audioUrl(BGM_BASE, BGM_FILES[name]));
-    bgmAudio.loop = true;
-    bgmAudio.preload = 'auto';
-    route(bgmAudio, bgmGain);
+    let a = bgmPool[name];
+    if (!a) {
+      a = new Audio(audioUrl(BGM_BASE, BGM_FILES[name]));
+      a.loop = true;
+      a.preload = 'auto';
+      bgmPool[name] = a;
+    }
+    bgmAudio = a;
     applyVolume(bgmAudio, 'bgm');
-    // 画面を触る前は自動再生が止められる。その場合は下のwakeAudioが鳴らし直す。
-    bgmAudio.play().catch(() => {});
+    // 画面を触る前は自動再生が止められる。その場合は下の操作待ち受けが鳴らし直す。
+    playBgmAudio(bgmAudio);
   };
 
   KBAudio.stopBgm = function () {
@@ -197,15 +339,21 @@
       wakeGraph(); // 操作の中でないとAudioContextは起きない
       if (bgmKey && bgmAudio && bgmAudio.paused) {
         applyVolume(bgmAudio, 'bgm');
-        bgmAudio.play().catch(() => {});
+        playBgmAudio(bgmAudio);
       }
     });
   });
 
   // 別のアプリに切り替えて戻るとAudioContextが止まったままになることがある。
   // つないだ要素はcontextが止まると鳴らなくなるので、戻ってきたら起こし直す。
+  // 別のアプリに切り替えて戻ってくると、iPhoneではAudioContextの音の出口が
+  // 切られていて、resume() しても音が戻らない（コードをコピーして友だちに送り、
+  // 戻ってきたらBGMも効果音も鳴らなくなる、という形で出た）。
+  // 直す方法が無いので、戻ってきたら古いものは捨てて作り直す。
+  // 出口が生きているなら触らない（PCでタブを行き来しただけのときはこちら）。
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+    if (document.hidden || !ctx) return;
+    if (ctx.state !== 'running') discardGraph();
   });
 
   window.KBAudio = KBAudio;

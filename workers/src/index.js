@@ -309,10 +309,47 @@ async function handleApi(request, env, url) {
     const me = await requireAuth(request, db);
     if (!me) return err(401, "認証が必要です");
     const code = parts[2].toUpperCase();
+    // 実際に申請が来ていたときだけ知らせを書くので、消す前に確かめる
+    const pending = await db
+      .prepare("SELECT 1 FROM friendships WHERE requester_code = ? AND recipient_code = ? AND status = 'pending'")
+      .bind(code, me.code)
+      .first();
     await db
       .prepare("DELETE FROM friendships WHERE requester_code = ? AND recipient_code = ? AND status = 'pending'")
       .bind(code, me.code)
       .run();
+    // 断ったことを申請した側に知らせる。これが無いと、相手の画面に
+    //「承認を待っています」が出たまま残り続けてしまう
+    if (pending) {
+      await db
+        .prepare("INSERT INTO friend_declines (to_code, from_code, from_nickname, created_at) VALUES (?, ?, ?, ?)")
+        .bind(code, me.code, me.nickname, Date.now())
+        .run();
+    }
+    return json({ ok: true });
+  }
+
+  // GET /api/friend-declines — 自分の申請が断られた、というまだ見ていない通知の一覧
+  if (method === "GET" && parts.length === 2 && parts[1] === "friend-declines") {
+    const me = await requireAuth(request, db);
+    if (!me) return err(401, "認証が必要です");
+    const rows = await db
+      .prepare(
+        `SELECT id, from_code, from_nickname, created_at FROM friend_declines
+         WHERE to_code = ? AND created_at > ? ORDER BY created_at DESC`
+      )
+      .bind(me.code, Date.now() - REMOVAL_TTL_MS)
+      .all();
+    return json({ declines: rows.results });
+  }
+
+  // DELETE /api/friend-declines/:id — 通知を確認済みにする
+  if (method === "DELETE" && parts.length === 3 && parts[1] === "friend-declines") {
+    const me = await requireAuth(request, db);
+    if (!me) return err(401, "認証が必要です");
+    const id = Number(parts[2]);
+    if (!Number.isInteger(id)) return err(400, "idが不正です");
+    await db.prepare("DELETE FROM friend_declines WHERE id = ? AND to_code = ?").bind(id, me.code).run();
     return json({ ok: true });
   }
 
@@ -566,9 +603,19 @@ async function handleApi(request, env, url) {
   return err(404, "not found");
 }
 
-// デプロイのたびに中身が変わるもの（HTML・アプリのJS・部首データ）は、
-// 古いキャッシュが残っているとサーバー側と食い違って壊れるため、毎回サーバーに
-// 確認させる。フォント・モデル・音などの重い固定ファイルはキャッシュさせたままにする。
+// Workerが自分で返す静的ファイルの応答に、毎回サーバーへ確認させる指示を付ける。
+//
+// ただし実測（2026-09-13）では、この処理は静的ファイルには効いていない。
+// Cloudflareは assets に置いたファイルをWorkerを通さず直接返すため、届くのは
+// Cloudflare側の既定値 "public, max-age=0, must-revalidate" の方だった
+// （/js/*.js・/data/*.json・/models/*.onnx いずれも確認済み）。
+// これも「使う前に必ずサーバーに聞く」指示なので、デプロイのたびに中身が変わる
+// HTML・JS・部首データが古いまま使われる心配は結果的に無い。
+//
+// 裏を返すと、モデル(2.2MB)・音・wasmといった中身の変わらない重いファイルにも
+// 毎回問い合わせが飛ぶ（変わっていなければ304が返るだけなので再ダウンロードは
+// されない）。これを変えたいときはWorker側ではなく、assetsディレクトリに
+// _headers を置いてファイルごとに指定する。
 const NO_CACHE_TYPES = ["text/html", "javascript", "application/json"];
 
 function withNoCache(res) {

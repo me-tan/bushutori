@@ -75,7 +75,9 @@
 | `GET /api/friends` | 必要 | `{friends: [{code, nickname, best: {low?, elem?, all?}}]}`。承認済みのみ |
 | `GET /api/friends/requests` | 必要 | `{requests: [{code, nickname, created_at}]}`。自分あての未承認の申請 |
 | `POST /api/friends/:code/accept` | 必要 | `code`からの申請を承認する |
-| `POST /api/friends/:code/decline` | 必要 | `code`からの申請を断る |
+| `POST /api/friends/:code/decline` | 必要 | `code`からの申請を断る。申請した側に`friend_declines`で通知を残す |
+| `GET /api/friend-declines` | 必要 | `{declines: [{id, from_code, from_nickname, created_at}]}`。自分が送ったフレンド申請が断られた、まだ確認していない通知（3日以内）。`from_code`でどの申請が断られたか特定できる |
+| `DELETE /api/friend-declines/:id` | 必要 | 通知を確認済みにする |
 | `DELETE /api/friends/:code` | 必要 | フレンド解除（承認済み・未承認どちらでも）。承認済みの関係を解除した場合のみ、相手に`removals`で通知を残す |
 | `GET /api/removals` | 必要 | `{removals: [{id, from_nickname, created_at}]}`。自分がフレンド解除された、まだ確認していない通知（3日以内） |
 | `DELETE /api/removals/:id` | 必要 | 解除通知を確認済みにする |
@@ -104,7 +106,8 @@
 `0005_removals.sql`: removals、`0006_invite_declines.sql`: invite_declines、
 `0007_invite_declines_room.sql`: invite_declines に room_code を追加、
 `0008_invite_cancels.sql`: invite_cancels、
-`0009_cleared.sql`: cleared）。
+`0009_cleared.sql`: cleared、
+`0010_friend_declines.sql`: friend_declines）。
 部首マスターの達成は端末ではなくアカウントに紐づけている。リロードで消えないため、
 かつ同じ端末で別の人がログインしたときに前の人の達成が見えないようにするため。
 `friends`テーブルは`0003`で使わなくなったが、データはそのまま残してある
@@ -120,7 +123,7 @@
    （`wrangler d1 execute kanjinage-users --remote --file=workers/migrations/0001_init.sql`、
    続けて`0002_invites.sql`、`0003_friend_requests.sql`、`0004_username_password.sql`、
    `0005_removals.sql`、`0006_invite_declines.sql`、`0007_invite_declines_room.sql`、
-   `0008_invite_cancels.sql`、`0009_cleared.sql`も）。
+   `0008_invite_cancels.sql`、`0009_cleared.sql`、`0010_friend_declines.sql`も）。
 4. `wrangler deploy` でフロントエンド（`frontend/`）とWorker（`workers/src/index.js`）を
    まとめてデプロイする。
 
@@ -141,5 +144,6 @@ wrangler d1 execute kanjinage-users --local --file=workers/migrations/0006_invit
 wrangler d1 execute kanjinage-users --local --file=workers/migrations/0007_invite_declines_room.sql
 wrangler d1 execute kanjinage-users --local --file=workers/migrations/0008_invite_cancels.sql
 wrangler d1 execute kanjinage-users --local --file=workers/migrations/0009_cleared.sql
+wrangler d1 execute kanjinage-users --local --file=workers/migrations/0010_friend_declines.sql
 wrangler dev --local
 ```
