@@ -81,6 +81,17 @@
     return readJson(res);
   }
 
+  async function listFriendDeclines() {
+    const res = await fetch("/api/friend-declines", { headers: authHeaders() });
+    const data = await readJson(res);
+    return data.declines;
+  }
+
+  async function dismissFriendDecline(id) {
+    const res = await fetch("/api/friend-declines/" + encodeURIComponent(id), { method: "DELETE", headers: authHeaders() });
+    return readJson(res);
+  }
+
   async function listFriends() {
     const res = await fetch("/api/friends", { headers: authHeaders() });
     const data = await readJson(res);
@@ -187,6 +198,7 @@
     createProfile, login, renameProfile, addFriend, removeFriend, listFriends, submitScore,
     listCleared, markCleared,
     listRemovals, dismissRemoval,
+    listFriendDeclines, dismissFriendDecline,
     listFriendRequests, acceptFriendRequest, declineFriendRequest,
     listRanking, sendInvite, cancelInvite, listInvites, dismissInvite, declineInvite,
     listInviteDeclines, dismissInviteDecline,

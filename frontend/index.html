@@ -763,6 +763,7 @@
   <div id="requestBanner" class="hidden" style="margin-bottom:16px"></div>
   <div id="inviteBanner" class="hidden" style="margin-bottom:16px"></div>
   <div id="removalBanner" class="hidden" style="margin-bottom:16px"></div>
+  <div id="friendDeclineBanner" class="hidden" style="margin-bottom:16px"></div>
   <div id="declineBanner" class="hidden" style="margin-bottom:16px"></div>
   <div id="cancelBanner" class="hidden" style="margin-bottom:16px"></div>
 
@@ -1110,16 +1111,16 @@
 <!-- ?v= はキャッシュを切るための版番号。Workerのno-cacheが効くのは、それ以降に
      取りに行った分だけなので、古いJSがブラウザに残って動き続けることがある。
      直したはずの不具合が手元で再現しないときは、この数字を1つ増やす。 -->
-<script src="js/vendor/kanji-canvas.js?v=12"></script>
-<script src="js/vendor/ort/ort.wasm.min.js?v=12"></script>
-<script src="js/recognizer.js?v=12"></script>
-<script src="js/config.js?v=12"></script>
-<script src="js/net.js?v=12"></script>
-<script src="js/audio.js?v=12"></script>
-<script src="js/players.js?v=12"></script>
-<script src="js/furigana.js?v=12"></script>
-<script src="js/dict.js?v=12"></script>
-<script src="js/battle.js?v=12"></script>
+<script src="js/vendor/kanji-canvas.js?v=13"></script>
+<script src="js/vendor/ort/ort.wasm.min.js?v=13"></script>
+<script src="js/recognizer.js?v=13"></script>
+<script src="js/config.js?v=13"></script>
+<script src="js/net.js?v=13"></script>
+<script src="js/audio.js?v=13"></script>
+<script src="js/players.js?v=13"></script>
+<script src="js/furigana.js?v=13"></script>
+<script src="js/dict.js?v=13"></script>
+<script src="js/battle.js?v=13"></script>
 <script>
 "use strict";
 
@@ -1240,12 +1241,14 @@ async function boot() {
    フレンド申請と対戦の誘いを一定間隔で見に行き、右上に点を出す。
    ──────────────────────────────────────────────────────────── */
 async function refreshFriendBadge() {
-  // 赤バッジ: フレンド関連の通知（申請が来ている／フレンドを解除された）
+  // 赤バッジ: フレンド関連の通知（申請が来ている／解除された／申請を断られた）
   const el = document.getElementById('friendReqBadge');
   if (!Players.getProfile()) { el.classList.add('hidden'); return; }
   try {
-    const [requests, removals] = await Promise.all([Players.listFriendRequests(), Players.listRemovals()]);
-    el.classList.toggle('hidden', !(requests.length || removals.length));
+    const [requests, removals, declines] = await Promise.all([
+      Players.listFriendRequests(), Players.listRemovals(), Players.listFriendDeclines(),
+    ]);
+    el.classList.toggle('hidden', !(requests.length || removals.length || declines.length));
   } catch (e) { el.classList.add('hidden'); }
 }
 
@@ -1360,6 +1363,7 @@ function refreshFriendsScreenIfOpen() {
   refreshFriendRequests();
   refreshInvites();
   refreshRemovals();
+  refreshFriendDeclines();
   refreshInviteDeclines();
   refreshInviteCancels();
   refreshFriendsList();
@@ -1864,10 +1868,39 @@ function renderFriendsScreen() {
   refreshFriendRequests();
   refreshInvites();
   refreshRemovals();
+  refreshFriendDeclines();
   refreshInviteDeclines();
   refreshInviteCancels();
   refreshFriendsList();
   refreshRanking(currentRankLevel);
+}
+
+// フレンド申請を断られた知らせ。これが無いと、申請した側は
+//「承認を待っています」が出たままで、断られたことが分からない
+async function refreshFriendDeclines() {
+  const el = document.getElementById('friendDeclineBanner');
+  let declines;
+  try { declines = await Players.listFriendDeclines(); }
+  catch (e) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  refreshFriendBadge();
+  // 断られた相手を待ち続けない
+  if (awaitingFriendCode && declines.some(d => d.from_code === awaitingFriendCode)) {
+    awaitingFriendCode = null;
+    setFriendsMsg('');
+  }
+  if (!declines.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  el.innerHTML = declines.map(d => `
+    <div class="inviteCard" style="margin-bottom:8px">
+      <div style="font-size:var(--t-sm);font-weight:700;color:var(--ink)">${d.from_nickname}さんにフレンド申請を断られました</div>
+      <button class="ghost" data-friend-decline-ok="${d.id}">確認した</button>
+    </div>`).join('');
+  el.querySelectorAll('[data-friend-decline-ok]').forEach(b => {
+    b.onclick = async () => {
+      await Players.dismissFriendDecline(b.dataset.friendDeclineOk).catch(() => {});
+      refreshFriendDeclines();
+    };
+  });
 }
 
 async function refreshRemovals() {

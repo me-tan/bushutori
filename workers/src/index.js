@@ -309,10 +309,47 @@ async function handleApi(request, env, url) {
     const me = await requireAuth(request, db);
     if (!me) return err(401, "認証が必要です");
     const code = parts[2].toUpperCase();
+    // 実際に申請が来ていたときだけ知らせを書くので、消す前に確かめる
+    const pending = await db
+      .prepare("SELECT 1 FROM friendships WHERE requester_code = ? AND recipient_code = ? AND status = 'pending'")
+      .bind(code, me.code)
+      .first();
     await db
       .prepare("DELETE FROM friendships WHERE requester_code = ? AND recipient_code = ? AND status = 'pending'")
       .bind(code, me.code)
       .run();
+    // 断ったことを申請した側に知らせる。これが無いと、相手の画面に
+    //「承認を待っています」が出たまま残り続けてしまう
+    if (pending) {
+      await db
+        .prepare("INSERT INTO friend_declines (to_code, from_code, from_nickname, created_at) VALUES (?, ?, ?, ?)")
+        .bind(code, me.code, me.nickname, Date.now())
+        .run();
+    }
+    return json({ ok: true });
+  }
+
+  // GET /api/friend-declines — 自分の申請が断られた、というまだ見ていない通知の一覧
+  if (method === "GET" && parts.length === 2 && parts[1] === "friend-declines") {
+    const me = await requireAuth(request, db);
+    if (!me) return err(401, "認証が必要です");
+    const rows = await db
+      .prepare(
+        `SELECT id, from_code, from_nickname, created_at FROM friend_declines
+         WHERE to_code = ? AND created_at > ? ORDER BY created_at DESC`
+      )
+      .bind(me.code, Date.now() - REMOVAL_TTL_MS)
+      .all();
+    return json({ declines: rows.results });
+  }
+
+  // DELETE /api/friend-declines/:id — 通知を確認済みにする
+  if (method === "DELETE" && parts.length === 3 && parts[1] === "friend-declines") {
+    const me = await requireAuth(request, db);
+    if (!me) return err(401, "認証が必要です");
+    const id = Number(parts[2]);
+    if (!Number.isInteger(id)) return err(400, "idが不正です");
+    await db.prepare("DELETE FROM friend_declines WHERE id = ? AND to_code = ?").bind(id, me.code).run();
     return json({ ok: true });
   }
 
