@@ -121,6 +121,7 @@
     if (bgmKey && bgmAudio && routed.has(bgmAudio)) {
       const key = bgmKey;
       const at = bgmAudio.currentTime || 0;
+      delete bgmPool[key]; // つないだ要素はつなぎ直せないので、控えからも外す
       KBAudio.stopBgm();
       KBAudio.playBgm(key);
       seekBgm(at);
@@ -215,6 +216,10 @@
 
   let bgmAudio = null;
   let bgmKey = null;
+  // BGMも曲ごとに1つだけ作って使い回す。画面を移るたびに止める・鳴らすを
+  // 繰り返すので、そのつど new Audio() すると音声の読み込み口が増え続け、
+  // iOSは同時に扱える数に上限があるため、遊んでいるうちに鳴らなくなる。
+  const bgmPool = {};
 
   // 復号が済むまでの控え。音ごとに1つだけ作って使い回す（鳴らすたびに
   // new Audio() すると、iOSは同時に扱える数に上限があるため、遊んでいるうちに
@@ -273,9 +278,14 @@
     KBAudio.stopBgm();
     if (!BGM_FILES[name]) return;
     bgmKey = name;
-    bgmAudio = new Audio(audioUrl(BGM_BASE, BGM_FILES[name]));
-    bgmAudio.loop = true;
-    bgmAudio.preload = 'auto';
+    let a = bgmPool[name];
+    if (!a) {
+      a = new Audio(audioUrl(BGM_BASE, BGM_FILES[name]));
+      a.loop = true;
+      a.preload = 'auto';
+      bgmPool[name] = a;
+    }
+    bgmAudio = a;
     applyVolume(bgmAudio, 'bgm');
     // 画面を触る前は自動再生が止められる。その場合は下の操作待ち受けが鳴らし直す。
     playBgmAudio(bgmAudio);
