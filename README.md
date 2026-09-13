@@ -64,7 +64,7 @@
 ## ディレクトリ構成
 
 ```
-kanjibattle/
+bushutori/
 ├── README.md
 ├── LICENSE                        本プロジェクトのライセンス（MIT）
 ├── third_party-licenses/          同梱物のライセンス（ライブラリ・認識モデル・辞書データ・音源）
