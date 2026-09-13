@@ -1110,16 +1110,16 @@
 <!-- ?v= はキャッシュを切るための版番号。Workerのno-cacheが効くのは、それ以降に
      取りに行った分だけなので、古いJSがブラウザに残って動き続けることがある。
      直したはずの不具合が手元で再現しないときは、この数字を1つ増やす。 -->
-<script src="js/vendor/kanji-canvas.js?v=11"></script>
-<script src="js/vendor/ort/ort.wasm.min.js?v=11"></script>
-<script src="js/recognizer.js?v=11"></script>
-<script src="js/config.js?v=11"></script>
-<script src="js/net.js?v=11"></script>
-<script src="js/audio.js?v=11"></script>
-<script src="js/players.js?v=11"></script>
-<script src="js/furigana.js?v=11"></script>
-<script src="js/dict.js?v=11"></script>
-<script src="js/battle.js?v=11"></script>
+<script src="js/vendor/kanji-canvas.js?v=12"></script>
+<script src="js/vendor/ort/ort.wasm.min.js?v=12"></script>
+<script src="js/recognizer.js?v=12"></script>
+<script src="js/config.js?v=12"></script>
+<script src="js/net.js?v=12"></script>
+<script src="js/audio.js?v=12"></script>
+<script src="js/players.js?v=12"></script>
+<script src="js/furigana.js?v=12"></script>
+<script src="js/dict.js?v=12"></script>
+<script src="js/battle.js?v=12"></script>
 <script>
 "use strict";
 
@@ -1315,6 +1315,9 @@ let currentRankLevel = 'elem';
 let pendingInvite = null; // { code, roomCode } 自分が送って返事待ちの対戦の誘い
 let inviteLevelPickerFor = null; // 難易度を選んでいる最中のフレンドコード
 let sendingInviteTo = null; // 誘いを送信中のフレンドコード
+// フレンド申請を送って承認待ちの相手のコード。承認されるとフレンド一覧に現れるので、
+// 現れた時点で「承認を待っています」の表示を消すために覚えておく
+let awaitingFriendCode = null;
 // 画面を切り替えてもページのスクロール位置はそのまま残る。一覧の下の方から
 // 漢字を開くと、詳細画面まで下までスクロールした状態で開いてしまうので、
 // 進むときは必ず先頭から見せる。戻るときだけ、離れたときの位置に返す
@@ -1856,6 +1859,7 @@ function renderFriendsScreen() {
   const p = Players.getProfile();
   if (!p) return;
   setFriendsErr(''); setFriendsMsg('');
+  awaitingFriendCode = null; // 開き直したら待ちの表示も持ち越さない
   document.getElementById('myCodeDisplay').textContent = p.code;
   refreshFriendRequests();
   refreshInvites();
@@ -2048,6 +2052,16 @@ async function refreshFriendsList() {
   try { friends = await Players.listFriends(); }
   catch (e) { if (firstLoad) listEl.innerHTML = `<div class="usedempty" style="padding:14px 2px">読み込めませんでした（${loadErrText(e)}）</div>`; return; }
   listEl.dataset.loaded = '1';
+
+  // 承認待ちにしていた相手が一覧に現れたら、承認されたということ。
+  // 「承認を待っています」を出したままにしない
+  if (awaitingFriendCode) {
+    const accepted = friends.find(f => f.code === awaitingFriendCode);
+    if (accepted) {
+      awaitingFriendCode = null;
+      setFriendsMsg(`${accepted.nickname}さんとフレンドになりました`);
+    }
+  }
 
   if (!friends.length) {
     listEl.innerHTML = '<div class="usedempty" style="padding:14px 2px">まだフレンドがいません</div>';
@@ -2250,11 +2264,15 @@ function bind() {
       const res = await Players.addFriend(code);
       input.value = '';
       if (res.status === 'accepted') {
+        awaitingFriendCode = null;
         setFriendsMsg(`${res.nickname}さんとフレンドになりました`);
         await refreshFriendsList();
         refreshRanking(currentRankLevel);
       }
-      else { setFriendsMsg(`${res.nickname}さんに申請を送りました。承認を待っています`); }
+      else {
+        awaitingFriendCode = code;
+        setFriendsMsg(`${res.nickname}さんに申請を送りました。承認を待っています`);
+      }
     } catch (e) { setFriendsErr(e.message || '追加できませんでした'); }
   };
   document.querySelectorAll('#rankLevelSeg .seg').forEach(b => {
